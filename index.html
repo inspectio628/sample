@@ -1,0 +1,33 @@
+const API_URL = '여기에_복사한_웹앱_URL_입력';
+
+// 1) 학생 신원확인 요청
+async function verifyStudent(name, studentId) {
+  const res = await fetch(API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // CORS 오류 방지용
+    body: JSON.stringify({
+      action: 'verify',
+      name: name,
+      studentId: studentId
+    })
+  });
+  const data = await res.json();
+  // data에는 이름/학번 없이 { ok, verified, isReturning, hasResult, latestResult }만 들어옴
+  console.log(data);
+}
+
+// 2) 퀴즈 점수 저장 요청
+async function submitQuiz(name, studentId, score) {
+  const res = await fetch(API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({
+      action: 'submit',
+      name: name,
+      studentId: studentId,
+      score: score
+    })
+  });
+  const data = await res.json();
+  console.log(data); // { ok: true, saved: true, score: 85, passed: "통과" }
+}
