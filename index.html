@@ -1,33 +1,108 @@
-const API_URL = '여기에_복사한_웹앱_URL_입력';
-
-// 1) 학생 신원확인 요청
-async function verifyStudent(name, studentId) {
-  const res = await fetch(API_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // CORS 오류 방지용
-    body: JSON.stringify({
-      action: 'verify',
-      name: name,
-      studentId: studentId
-    })
-  });
-  const data = await res.json();
-  // data에는 이름/학번 없이 { ok, verified, isReturning, hasResult, latestResult }만 들어옴
-  console.log(data);
+// 1. 이름 + 학번 + 비밀키(Salt)를 조합해 복원 불가능한 식별키(SHA-256) 생성
+function createHash(name, studentId) {
+  const props = PropertiesService.getScriptProperties();
+  const salt = props.getProperty('SECRET_SALT') || 'TEMP_SALT_CHANGE_IN_SETTINGS';
+  const raw = `${String(name).trim()}|${String(studentId).trim()}|${salt}`;
+  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, raw, Utilities.Charset.UTF_8);
+  return digest.map(b => ('0' + (b & 0xFF).toString(16)).slice(-2)).join('');
 }
 
-// 2) 퀴즈 점수 저장 요청
-async function submitQuiz(name, studentId, score) {
-  const res = await fetch(API_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify({
-      action: 'submit',
-      name: name,
-      studentId: studentId,
-      score: score
-    })
-  });
-  const data = await res.json();
-  console.log(data); // { ok: true, saved: true, score: 85, passed: "통과" }
+// 2. JSON 응답 생성 헬퍼 (개인정보는 절대 포함하지 않음)
+function jsonResponse(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+// 3. 웹 앱의 POST 요청 처리 (GET 요청은 차단하여 데이터 노출 방지)
+function doPost(e) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000); // 동시 접속 시 데이터 꼬임 방지
+
+  try {
+    const req = JSON.parse(e.postData.contents);
+    const action = req.action; // 'verify' (신원확인) 또는 'submit' (점수 저장)
+    const name = (req.name || '').trim();
+    const studentId = String(req.studentId || '').trim();
+
+    if (!name || !studentId) {
+      return jsonResponse({ ok: false, message: '이름과 학번을 모두 입력해 주세요.' });
+    }
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const studentSheet = ss.getSheetByName('학생_DB');
+    const resultSheet = ss.getSheetByName('퀴즈_결과');
+    const hash = createHash(name, studentId);
+    const now = new Date();
+
+    // 학생_DB에서 식별키 검색 (A열 = 식별키)
+    const studentData = studentSheet.getDataRange().getValues();
+    let studentRowIndex = -1;
+    for (let i = 1; i < studentData.length; i++) {
+      if (studentData[i][0] === hash) {
+        studentRowIndex = i + 1;
+        break;
+      }
+    }
+
+    // [기능 1] 신원확인 및 최초 등록
+    if (action === 'verify') {
+      if (studentRowIndex === -1) {
+        // 신규 학생: DB에만 저장
+        studentSheet.appendRow([hash, name, studentId, now, now]);
+        return jsonResponse({
+          ok: true,
+          verified: true,
+          isReturning: false,
+          hasResult: false
+        });
+      } else {
+        // 재접속 학생: 최근 접속일시 업데이트 후 기존 퀴즈 결과만 조회
+        studentSheet.getRange(studentRowIndex, 5).setValue(now);
+
+        const results = resultSheet.getDataRange().getValues();
+        let latestResult = null;
+        for (let i = results.length - 1; i >= 1; i--) {
+          if (results[i][1] === hash) {
+            latestResult = { score: results[i][2], passed: results[i][3] };
+            break;
+          }
+        }
+
+        return jsonResponse({
+          ok: true,
+          verified: true,
+          isReturning: true,
+          hasResult: Boolean(latestResult),
+          latestResult: latestResult
+        });
+      }
+    }
+
+    // [기능 2] 퀴즈 점수 저장
+    if (action === 'submit') {
+      if (studentRowIndex === -1) {
+        studentSheet.appendRow([hash, name, studentId, now, now]);
+      } else {
+        studentSheet.getRange(studentRowIndex, 5).setValue(now);
+      }
+
+      const score = Number(req.score);
+      const passed = score >= 60 ? '통과' : '미통과'; // 합격 기준 점수에 맞게 수정 가능
+      resultSheet.appendRow([now, hash, score, passed]);
+
+      return jsonResponse({
+        ok: true,
+        saved: true,
+        score: score,
+        passed: passed
+      });
+    }
+
+    return jsonResponse({ ok: false, message: '알 수 없는 요청입니다.' });
+  } catch (err) {
+    return jsonResponse({ ok: false, message: '처리 중 오류가 발생했습니다.' });
+  } finally {
+    lock.releaseLock();
+  }
 }
